@@ -64,13 +64,13 @@ rbmc_ntrip_optmized/
 
 ## 📖 Como Funciona
 
-1. **Gateway**:
+1. **client_ntrip**:
 
    * Captura GGA e envia ao Caster.
    * Recebe RTCM3 em chunks, valida CRC e repassa ao GNSS.
    * Mantém GGA ativo via reenvio periódico e reconecta automaticamente.
 
-2. **Caster**:
+2. **caster_ntrip**:
 
    * Processa GGA recebido, calcula estação IBGE mais próxima.
    * Conecta ao RBMC Caster, envia header NTRIP e replica RTCM.
