@@ -1,5 +1,5 @@
 # ── Build Stage ──────────────────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.13.5-slim
 
 # Metadados
 LABEL maintainer="rbmc_ntrip_optimized"
