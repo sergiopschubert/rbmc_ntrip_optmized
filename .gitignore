@@ -1,5 +1,4 @@
 .env
-.env.production
 logs
 __pycache__
 .agent
