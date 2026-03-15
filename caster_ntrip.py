@@ -25,7 +25,7 @@ RBMC_PASS         = os.getenv('RBMC_PASS')
 IBGE_ENDPOINT_URL = os.getenv('IBGE_ENDPOINT_URL')
 LOCAL_NTRIP_PORT  = int(os.getenv('LOCAL_NTRIP_PORT'))
 LOCAL_NTRIP_PORT_FIXED = int(os.getenv('LOCAL_NTRIP_PORT_FIXED', '2103'))
-GGA_CHECK_INTERVAL = 0.1  # intervalo de leitura de GGA
+GGA_CHECK_INTERVAL = 1  # intervalo de leitura de GGA
 
 # --- Timeouts do servidor ---
 CONN_SEND_TIMEOUT  = 10   # timeout máximo para sendall (s)
