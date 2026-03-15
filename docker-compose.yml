@@ -1,0 +1,30 @@
+services:
+  caster:
+    build: .
+    image: caster-ntrip:latest
+    container_name: caster-ntrip
+    restart: unless-stopped
+
+    # Portas TCP expostas ao host
+    ports:
+      - "2102:2102"   # Caster Otimizado (troca automática de base)
+      - "2103:2103"   # Caster Base Fixa (mountpoint via rota)
+
+    # Variáveis de ambiente carregadas do arquivo .env na mesma pasta
+    env_file:
+      - .env
+
+    # Logs: mantém os últimos 10MB em até 3 arquivos
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Health check: verifica se as portas TCP estão aceitando conexões
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('localhost',2102),timeout=5); s.close()\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

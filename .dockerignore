@@ -1,0 +1,31 @@
+# Controle de versão
+.git/
+.gitignore
+
+# Ambiente virtual e cache Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Configurações locais e credenciais
+.env
+.env.production
+
+# Arquivos que não são usados pelo caster
+client_ntrip_test.py
+simulations/
+logs/
+"files simulation"/
+
+# Documentação e artifacts
+*.md
+.agent/
+
+# Editor e SO
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
