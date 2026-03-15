@@ -12,7 +12,7 @@ services:
 
     # Variáveis de ambiente carregadas do arquivo .env na mesma pasta
     env_file:
-      - .env.production
+      - .env
 
     # Logs: mantém os últimos 10MB em até 3 arquivos
     logging:
