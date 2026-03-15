@@ -7,7 +7,7 @@ services:
 
     # Portas TCP expostas ao host
     ports:
-      - "2102:2102" # Caster Otimizado (troca automática de base)
+      - "2103:2103" # Caster Otimizado (troca automática de base)
       - "2104:2104" # Caster Base Fixa (mountpoint via rota)
 
     # Variáveis de ambiente carregadas do arquivo .env na mesma pasta
