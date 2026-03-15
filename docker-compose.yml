@@ -11,8 +11,14 @@ services:
       - "2103:2103" # Caster Base Fixa (mountpoint via rota)
 
     # Variáveis de ambiente carregadas do arquivo .env na mesma pasta
-    env_file:
-      - .env
+    environment:
+      RBMC_CASTER: ${RBMC_CASTER}
+      RBMC_PORT: ${RBMC_PORT}
+      RBMC_USER: ${RBMC_USER}
+      RBMC_PASS: ${RBMC_PASS}
+      IBGE_ENDPOINT_URL: ${IBGE_ENDPOINT_URL}
+      LOCAL_NTRIP_PORT: ${LOCAL_NTRIP_PORT:-2102}
+      LOCAL_NTRIP_PORT_FIXED: ${LOCAL_NTRIP_PORT_FIXED:-2103}
 
     # Logs: mantém os últimos 10MB em até 3 arquivos
     logging:
