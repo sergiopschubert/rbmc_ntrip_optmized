@@ -21,9 +21,11 @@ COPY caster_ntrip.py .
 COPY services/ ./services/
 
 # Portas expostas pelo caster
-# 2102 — Caster Otimizado (troca automática de base)
-# 2103 — Caster Base Fixa (mountpoint via rota)
-EXPOSE 2103 2104
+# 2103 — Caster Base Fixa (mountpoint via rota) 
+# 2104 — Caster Otimizado (troca automática de base)
+# 2153 — Status server — Caster Base Fixa (base ativa)
+# 2154 — Status server — Caster Otimizado (base ativa)
+EXPOSE 2103 2104 2153 2154
 
 # Comando de inicialização
 CMD ["python", "-u", "caster_ntrip.py"]

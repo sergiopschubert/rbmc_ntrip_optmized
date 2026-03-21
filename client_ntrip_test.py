@@ -21,12 +21,15 @@ GGA_INTERVAL = 60
 LOG = 'ACTIVE'
 
 # Constantes de reconexão
-CONNECT_TIMEOUT = 10       # timeout para create_connection (s)
-SOCKET_TIMEOUT  = 30       # timeout de leitura no socket (s)
-RECONNECT_BASE  = 2        # delay inicial de reconexão (s)
-RECONNECT_MAX   = 30       # delay máximo de reconexão (s)
+CONNECT_TIMEOUT  = 10      # timeout para create_connection (s)
+SOCKET_TIMEOUT   = 30      # timeout de leitura no socket (s)
+RECONNECT_BASE   = 2       # delay inicial de reconexão (s)
+RECONNECT_MAX    = 30      # delay máximo de reconexão (s)
+STATUS_INTERVAL  = 30      # intervalo de envio periódico da base (s) — deve bater com o caster
+STATUS_PORT_OFFSET = 50    # offset da porta de status em relação ao caster_port
 
 _debug_log_name: str | None = None
+_base_log_name:  str | None = None
 
 
 def parse_args():
@@ -58,10 +61,58 @@ def make_debug_log_name(prefix: str) -> str:
     return f"logs/DEBUG{ts_str}.txt"
 
 
+def make_base_log_name(prefix: str) -> str:
+    ts_str = datetime.now().strftime("%d%m%y-%H%M%S")
+    if prefix:
+        return f"logs/{prefix}_BASES{ts_str}.txt"
+    return f"logs/BASES{ts_str}.txt"
+
+
 def log(line, log_name):
     if LOG == 'ACTIVE':
         with open(log_name, 'a', encoding='utf-8') as f:
             f.write(line + '\n')
+
+
+def blog(msg: str):
+    """Salva uma entrada no arquivo dedicado de log de bases."""
+    if _base_log_name:
+        ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        with open(_base_log_name, 'a', encoding='utf-8') as f:
+            f.write(f"[{ts_now}] {msg}\n")
+
+
+def status_reader(host: str, status_port: int, tag: str, stop_event: threading.Event):
+    """Conecta ao StatusServer do caster e loga a base ativa.
+    Reconecta automaticamente em caso de falha."""
+    while not stop_event.is_set():
+        s = None
+        try:
+            s = socket.create_connection((host, status_port), timeout=CONNECT_TIMEOUT)
+            s.settimeout(STATUS_INTERVAL + 10)
+            buf = ''
+            while not stop_event.is_set():
+                chunk = s.recv(256).decode('ascii', errors='ignore')
+                if not chunk:
+                    break
+                buf += chunk
+                while '\n' in buf:
+                    line, buf = buf.split('\n', 1)
+                    line = line.strip()
+                    if line.startswith('BASE:'):
+                        base = line[5:]
+                        msg = f"[BASE RTCM]{tag} Base ativa: {base}"
+                        dprint(f"[{ts()}]{msg}")
+                        blog(msg)
+        except Exception:
+            if not stop_event.is_set():
+                time.sleep(5)
+        finally:
+            if s:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
 
 def ts():
@@ -261,16 +312,29 @@ def rtcm_gateway(ser, sock, stop_event, tag, stats):
 
 
 def run_gateway(serial_port, caster_port, log_prefix, mount=None):
-    global _debug_log_name
+    global _debug_log_name, _base_log_name
     _debug_log_name = make_debug_log_name(log_prefix)
+    _base_log_name  = make_base_log_name(log_prefix)
 
     tag = f" [{log_prefix}]" if log_prefix else ""
     log_name = make_log_name(log_prefix)
     dprint(f"[{ts()}][+]{tag} Debug log: {_debug_log_name}")
+    dprint(f"[{ts()}][+]{tag} Base log:  {_base_log_name}")
     dprint(f"[{ts()}][+]{tag} Log: {log_name}")
 
     ser = serial.Serial(serial_port, BAUDRATE, timeout=1)
     dprint(f"[{ts()}][+]{tag} Serial aberta em {serial_port}@{BAUDRATE}")
+
+    # Thread de status de base — vive durante toda a execução do gateway
+    stop_status = threading.Event()
+    status_port = caster_port + STATUS_PORT_OFFSET
+    dprint(f"[{ts()}][+]{tag} Conectando ao Status server em {ORCH_HOST}:{status_port}")
+    threading.Thread(
+        target=status_reader,
+        args=(ORCH_HOST, status_port, tag, stop_status),
+        daemon=True,
+        name=f"status-reader-{status_port}",
+    ).start()
 
     t1 = None
     stop_sock = threading.Event()

@@ -31,6 +31,61 @@ GGA_CHECK_INTERVAL = 0.1  # intervalo de leitura de GGA
 CONN_SEND_TIMEOUT  = 10   # timeout máximo para sendall (s)
 CONN_RECV_TIMEOUT  = 30   # timeout de recv quando não chega dados (s)
 
+# --- Portas de status (derivadas: porta principal + 50) ---
+STATUS_PORT_OPT   = LOCAL_NTRIP_PORT + 50
+STATUS_PORT_FIXED = LOCAL_NTRIP_PORT_FIXED + 50
+STATUS_INTERVAL   = 30    # segundos entre envios periódicos da base
+
+
+# =============================================================================
+# StatusServer — canal de status de base para o client
+# =============================================================================
+class StatusServer:
+    """Servidor de status que notifica o client sobre qual base está ativa.
+    Envia 'BASE:<id>\\n' ao conectar, a cada STATUS_INTERVAL segundos, e
+    imediatamente quando a base muda."""
+
+    def __init__(self, port: int, tag: str):
+        self.port = port
+        self.tag = tag
+        self._base: str | None = None
+        self._lock = threading.Lock()
+
+    def set_base(self, base_id: str):
+        with self._lock:
+            self._base = base_id
+
+    def _handle_client(self, conn):
+        last_sent = None
+        last_periodic = 0.0
+        try:
+            while True:
+                with self._lock:
+                    base = self._base
+                now = time.time()
+                if base and (base != last_sent or now - last_periodic >= STATUS_INTERVAL):
+                    conn.sendall(f"BASE:{base}\n".encode('ascii'))
+                    last_sent = base
+                    last_periodic = now
+                time.sleep(1)
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def _serve(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', self.port))
+        sock.listen(5)
+        print(f"{self.tag} Status server na porta {self.port}")
+        while True:
+            conn, _ = sock.accept()
+            threading.Thread(target=self._handle_client, args=(conn,), daemon=True).start()
+
+    def start(self):
+        threading.Thread(target=self._serve, daemon=True, name=f"status-{self.port}").start()
+
 
 def parse_gngga(sentence: str):
     parts = sentence.strip().split(',')
@@ -56,8 +111,9 @@ def _configure_conn(conn, tag):
 # Caster OTIMIZADO — troca automática de base (comportamento original)
 # =============================================================================
 class Caster:
-    def __init__(self, listen_port: int):
+    def __init__(self, listen_port: int, status_server: StatusServer):
         self.listen_port = listen_port
+        self.status_server = status_server
         self.sock = None
         self.ntrip_state = None
         self.state = 'INITIALIZE'
@@ -136,6 +192,7 @@ class Caster:
                             self.main_base = main_b_new
                             self.helper_base = helper_b_new
                             self.current_base = self.main_base
+                            self.status_server.set_base(self.current_base['id'])
                             self.state = 'INITIALIZE'
                             print(f"{self.tag} Novo estado: {self.state}")
 
@@ -189,6 +246,7 @@ class Caster:
                 self.main_base = main_base
                 self.helper_base = helper_base
                 print(f"{self.tag} Base inicial: {self.current_base['id']} ({self.current_base['distance_km']:.1f} km)")
+                self.status_server.set_base(self.current_base['id'])
                 self.state = 'CONECT_RBMC'
                 print(f"{self.tag} Novo estado: {self.state}")
 
@@ -210,8 +268,9 @@ class Caster:
 #     mas NÃO troca durante a sessão ("nearest-fixo").
 # =============================================================================
 class FixedBaseCaster:
-    def __init__(self, listen_port: int):
+    def __init__(self, listen_port: int, status_server: StatusServer):
         self.listen_port = listen_port
+        self.status_server = status_server
         self.sock = None
         self.tag = '[Caster-FIX]'
 
@@ -298,6 +357,7 @@ class FixedBaseCaster:
 
                 # 3) Conecta ao RBMC com base fixa
                 print(f"{self.tag} Base fixa para esta sessão: {mountpoint}")
+                self.status_server.set_base(mountpoint)
                 client = NtripClient(mountpoint, RBMC_HOST, RBMC_PORT, RBMC_USER, RBMC_PASS)
                 client.start()
 
@@ -349,13 +409,17 @@ class FixedBaseCaster:
 # =============================================================================
 def run_optimized_caster():
     print("[Main] Iniciando Caster OTIMIZADO na porta", LOCAL_NTRIP_PORT)
-    caster = Caster(LOCAL_NTRIP_PORT)
+    status = StatusServer(STATUS_PORT_OPT, '[Caster-OPT]')
+    status.start()
+    caster = Caster(LOCAL_NTRIP_PORT, status)
     caster.serve()  # socket de escuta persistente, aceita reconexões rápidas
 
 
 def run_fixed_caster():
     print(f"[Main] Iniciando Caster BASE FIXA na porta {LOCAL_NTRIP_PORT_FIXED} (mountpoint via rota)")
-    caster = FixedBaseCaster(LOCAL_NTRIP_PORT_FIXED)
+    status = StatusServer(STATUS_PORT_FIXED, '[Caster-FIX]')
+    status.start()
+    caster = FixedBaseCaster(LOCAL_NTRIP_PORT_FIXED, status)
     caster.serve()
 
 
