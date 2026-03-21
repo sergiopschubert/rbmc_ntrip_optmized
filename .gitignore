@@ -5,4 +5,6 @@ __pycache__
 files simulation
 services\__pycache__
 deploy
+.venv
+.vscode
 
