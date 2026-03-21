@@ -7,4 +7,4 @@ services\__pycache__
 deploy
 .venv
 .vscode
-
+.env.production

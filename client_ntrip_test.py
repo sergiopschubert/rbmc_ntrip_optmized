@@ -4,6 +4,7 @@ import socket
 import time
 import argparse
 import sys
+import math
 from crccheck.crc import Crc24LteA
 from dotenv import load_dotenv
 import os
@@ -24,6 +25,8 @@ CONNECT_TIMEOUT = 10       # timeout para create_connection (s)
 SOCKET_TIMEOUT  = 30       # timeout de leitura no socket (s)
 RECONNECT_BASE  = 2        # delay inicial de reconexão (s)
 RECONNECT_MAX   = 30       # delay máximo de reconexão (s)
+
+_debug_log_name: str | None = None
 
 
 def parse_args():
@@ -48,6 +51,13 @@ def make_log_name(prefix: str) -> str:
     return f"logs/LOG{ts}.txt"
 
 
+def make_debug_log_name(prefix: str) -> str:
+    ts_str = datetime.now().strftime("%d%m%y-%H%M%S")
+    if prefix:
+        return f"logs/{prefix}_DEBUG{ts_str}.txt"
+    return f"logs/DEBUG{ts_str}.txt"
+
+
 def log(line, log_name):
     if LOG == 'ACTIVE':
         with open(log_name, 'a', encoding='utf-8') as f:
@@ -57,6 +67,26 @@ def log(line, log_name):
 def ts():
     """Timestamp formatado para logs de console."""
     return datetime.now().strftime("%H:%M:%S")
+
+
+def dprint(*args, **kwargs):
+    """Print no console e salva no arquivo de debug com timestamp."""
+    print(*args, **kwargs)
+    if _debug_log_name:
+        msg = ' '.join(str(a) for a in args)
+        ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        with open(_debug_log_name, 'a', encoding='utf-8') as f:
+            f.write(f"[{ts_now}] {msg}\n")
+
+
+def calcula_precisao_gst(lat_erro, lon_erro):
+    if lat_erro is None or lon_erro is None:
+        return None
+    try:
+        precisao = math.sqrt(float(lat_erro)**2 + float(lon_erro)**2)
+        return "%.3f" % precisao
+    except ValueError:
+        return None
 
 
 def serial_reader(ser, sock, stop_event, stop_sock, log_name, tag):
@@ -72,7 +102,7 @@ def serial_reader(ser, sock, stop_event, stop_sock, log_name, tag):
             continue
         line = raw.decode('ascii', errors='ignore').strip()
         if line.startswith('$PUBX,00'):
-            print(f"[{ts()}][GNSS PUBX]{tag} {line}")
+            dprint(f"[{ts()}][GNSS PUBX]{tag} {line}")
             log(line, log_name)
         elif line.startswith('$GNGGA'):
             check_lat = line.split(',')[4]
@@ -82,10 +112,10 @@ def serial_reader(ser, sock, stop_event, stop_sock, log_name, tag):
                 if not stop_sock.is_set():
                     try:
                         sock.sendall((gga_sentence + '\r\n').encode('ascii'))
-                        print(f"[{ts()}][Gateway]{tag} Reenviado GGA: {gga_sentence}")
+                        dprint(f"[{ts()}][Gateway]{tag} Reenviado GGA: {gga_sentence}")
                         first_gga = False
                     except (OSError, BrokenPipeError, ConnectionResetError) as e:
-                        print(f"[{ts()}][serial_reader]{tag} Socket fechado ao enviar GGA: {e}")
+                        dprint(f"[{ts()}][serial_reader]{tag} Socket fechado ao enviar GGA: {e}")
                         stop_sock.set()
                         break
                 else:
@@ -93,13 +123,29 @@ def serial_reader(ser, sock, stop_event, stop_sock, log_name, tag):
                 timer = 0
                 t0 = time.time()
 
-            print(f"[{ts()}][GNSS NMEA]{tag} {line}")
+            parts = line.split(',')
+            fix_quality = parts[6] if len(parts) > 6 else '?'
+            num_sats    = parts[7] if len(parts) > 7 else '?'
+            dprint(f"[{ts()}][GNSS GGA]{tag} fix={fix_quality} sats={num_sats} | {line}")
+            log(line, log_name)
+        elif '$GNGST' in line:
+            parts = line.split(',')
+            if len(parts) >= 8:
+                try:
+                    lat_err = parts[6] or None
+                    lon_raw = parts[7].split('*')[0] if len(parts) > 7 else None
+                    lon_err = lon_raw or None
+                    precisao = calcula_precisao_gst(lat_err, lon_err)
+                    if precisao:
+                        dprint(f"[{ts()}][PRECISÃO GST]{tag} {precisao} m  (lat_err={lat_err}, lon_err={lon_err})")
+                except Exception:
+                    pass
             log(line, log_name)
         elif line.startswith('$GN'):
-            print(f"[{ts()}][GNSS NMEA]{tag} {line}")
+            dprint(f"[{ts()}][GNSS NMEA]{tag} {line}")
             log(line, log_name)
 
-    print(f"[{ts()}][serial_reader]{tag} encerrado")
+    dprint(f"[{ts()}][serial_reader]{tag} encerrado")
 
 
 def get_rtcm_msg_type(frame: bytes) -> int:
@@ -136,14 +182,9 @@ def extract_rtcm_frame(buffer: bytearray):
 
 def process_rtcm_buffer(buffer: bytearray, ser, tag):
     """
-    Extrai TODOS os frames RTCM do buffer, deduplica por tipo de mensagem,
-    e envia ao receptor apenas o frame mais recente de cada tipo.
-    Isso evita que dados RTCM antigos (acumulados por lag) cheguem ao receptor.
+    Extrai TODOS os frames RTCM do buffer e envia ao receptor em ordem de chegada.
     """
-    # Fase 1: Extrair todos os frames válidos do buffer
-    frames_by_type = {}   # msg_type → (frame, frame_len)
-    total_extracted = 0
-    total_frames = 0
+    frames = []
     crc_errors = 0
 
     while True:
@@ -151,36 +192,24 @@ def process_rtcm_buffer(buffer: bytearray, ser, tag):
         if consumed == 0:
             break
         del buffer[:consumed]
-        total_extracted += consumed
         if frame is not None:
-            msg_type = get_rtcm_msg_type(frame)
-            frames_by_type[msg_type] = frame  # sobrescreve → mantém o mais recente
-            total_frames += 1
+            frames.append(frame)
         else:
             crc_errors += 1
 
-    if total_frames == 0:
+    if not frames:
         return
 
-    # Fase 2: Enviar ao receptor apenas o frame mais recente de cada tipo
-    sent = len(frames_by_type)
-    discarded = total_frames - sent
-
-    for msg_type, frame in frames_by_type.items():
+    for frame in frames:
         ser.write(frame)
         ser.flush()
 
-    if discarded > 0:
-        print(f"[{ts()}][RTCM → GNSS]{tag} Burst detectado: {total_frames} frames extraídos, "
-              f"{discarded} stale descartados, {sent} enviados "
-              f"(tipos: {sorted(frames_by_type.keys())})")
-    else:
-        types_str = ','.join(str(t) for t in sorted(frames_by_type.keys()))
-        total_bytes = sum(len(f) for f in frames_by_type.values())
-        print(f"[{ts()}][RTCM → GNSS]{tag} Sent {sent} frames ({total_bytes} bytes), tipos: [{types_str}]")
+    types_str = ','.join(str(get_rtcm_msg_type(f)) for f in frames)
+    total_bytes = sum(len(f) for f in frames)
+    dprint(f"[{ts()}][RTCM → GNSS]{tag} Sent {len(frames)} frames ({total_bytes} bytes), tipos: [{types_str}]")
 
     if crc_errors > 0:
-        print(f"[{ts()}][process_rtcm]{tag} {crc_errors} frames descartados por CRC inválido")
+        dprint(f"[{ts()}][process_rtcm]{tag} {crc_errors} frames descartados por CRC inválido")
 
 
 def rtcm_gateway(ser, sock, stop_event, tag, stats):
@@ -195,27 +224,27 @@ def rtcm_gateway(ser, sock, stop_event, tag, stats):
         while not stop_event.is_set() and b'\r\n\r\n' not in hdr:
             chunk = f.read(1)
             if not chunk:
-                print(f"[{ts()}][rtcm_gateway]{tag} Conexão fechada durante leitura do header")
+                dprint(f"[{ts()}][rtcm_gateway]{tag} Conexão fechada durante leitura do header")
                 stop_event.set()
                 return
             hdr += chunk
         if stop_event.is_set():
-            print(f"[{ts()}][rtcm_gateway]{tag} encerrado antes de iniciar parsing")
+            dprint(f"[{ts()}][rtcm_gateway]{tag} encerrado antes de iniciar parsing")
             return
-        print(f"[{ts()}][Gateway]{tag} Header NTRIP recebido, iniciando parser chunked RTCM")
+        dprint(f"[{ts()}][Gateway]{tag} Header NTRIP recebido, iniciando parser chunked RTCM")
         buffer = bytearray()
         while not stop_event.is_set():
             size_line = f.readline()
             if not size_line:
-                print(f"[{ts()}][Gateway]{tag} EOF ao ler tamanho do chunk")
+                dprint(f"[{ts()}][Gateway]{tag} EOF ao ler tamanho do chunk")
                 break
             try:
                 size = int(size_line.strip(), 16)
             except ValueError:
-                print(f"[{ts()}][Gateway]{tag} chunk size parse error: {size_line.strip()}")
+                dprint(f"[{ts()}][Gateway]{tag} chunk size parse error: {size_line.strip()}")
                 continue
             if size == 0:
-                print(f"[{ts()}][Gateway]{tag} chunk size 0, fim do stream")
+                dprint(f"[{ts()}][Gateway]{tag} chunk size 0, fim do stream")
                 break
             data = f.read(size)
             f.read(2)
@@ -223,21 +252,25 @@ def rtcm_gateway(ser, sock, stop_event, tag, stats):
             buffer.extend(data)
             process_rtcm_buffer(buffer, ser, tag)
     except socket.timeout:
-        print(f"[{ts()}][Gateway]{tag} TIMEOUT: sem dados RTCM há {SOCKET_TIMEOUT}s — reconectando")
+        dprint(f"[{ts()}][Gateway]{tag} TIMEOUT: sem dados RTCM há {SOCKET_TIMEOUT}s — reconectando")
     except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
-        print(f"[{ts()}][Gateway]{tag} Conexão perdida: {e}")
+        dprint(f"[{ts()}][Gateway]{tag} Conexão perdida: {e}")
     finally:
         stop_event.set()
-        print(f"[{ts()}][rtcm_gateway]{tag} encerrado, stop_event: {stop_event.is_set()}")
+        dprint(f"[{ts()}][rtcm_gateway]{tag} encerrado, stop_event: {stop_event.is_set()}")
 
 
 def run_gateway(serial_port, caster_port, log_prefix, mount=None):
+    global _debug_log_name
+    _debug_log_name = make_debug_log_name(log_prefix)
+
     tag = f" [{log_prefix}]" if log_prefix else ""
     log_name = make_log_name(log_prefix)
-    print(f"[{ts()}][+]{tag} Log: {log_name}")
+    dprint(f"[{ts()}][+]{tag} Debug log: {_debug_log_name}")
+    dprint(f"[{ts()}][+]{tag} Log: {log_name}")
 
     ser = serial.Serial(serial_port, BAUDRATE, timeout=1)
-    print(f"[{ts()}][+]{tag} Serial aberta em {serial_port}@{BAUDRATE}")
+    dprint(f"[{ts()}][+]{tag} Serial aberta em {serial_port}@{BAUDRATE}")
 
     t1 = None
     stop_sock = threading.Event()
@@ -254,7 +287,7 @@ def run_gateway(serial_port, caster_port, log_prefix, mount=None):
 
     while True:
         try:
-            print(f"[{ts()}][Gateway]{tag} Conectando ao Caster {ORCH_HOST}:{caster_port} (timeout {CONNECT_TIMEOUT}s)...")
+            dprint(f"[{ts()}][Gateway]{tag} Conectando ao Caster {ORCH_HOST}:{caster_port} (timeout {CONNECT_TIMEOUT}s)...")
             sock = socket.create_connection((ORCH_HOST, caster_port), timeout=CONNECT_TIMEOUT)
 
             # TCP Keepalive — detecta conexões mortas rapidamente
@@ -263,7 +296,7 @@ def run_gateway(serial_port, caster_port, log_prefix, mount=None):
                 # Windows: (habilitar, intervalo ms, timeout ms)
                 sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 10000, 5000))
 
-            print(f"[{ts()}][+]{tag} TCP conectado ao Caster em {ORCH_HOST}:{caster_port}")
+            dprint(f"[{ts()}][+]{tag} TCP conectado ao Caster em {ORCH_HOST}:{caster_port}")
 
             # Reset do backoff após conexão bem-sucedida
             reconnect_delay = RECONNECT_BASE
@@ -272,13 +305,13 @@ def run_gateway(serial_port, caster_port, log_prefix, mount=None):
             reconnect_count += 1
             stats['session_start'] = time.time()
             stats['bytes_received'] = 0
-            print(f"[{ts()}][Stats]{tag} Sessão #{reconnect_count} iniciada")
+            dprint(f"[{ts()}][Stats]{tag} Sessão #{reconnect_count} iniciada")
 
             # Se mount definido, envia requisição NTRIP com mountpoint
             if mount:
                 ntrip_req = f"GET /{mount} HTTP/1.1\r\nHost: {ORCH_HOST}\r\n\r\n"
                 sock.sendall(ntrip_req.encode('ascii'))
-                print(f"[{ts()}][+]{tag} Enviado GET /{mount} ao caster (base fixa)")
+                dprint(f"[{ts()}][+]{tag} Enviado GET /{mount} ao caster (base fixa)")
 
             if t1:
                 stop_read_serial.set()
@@ -296,15 +329,15 @@ def run_gateway(serial_port, caster_port, log_prefix, mount=None):
                 time.sleep(0.2)
 
         except socket.timeout:
-            print(f"[{ts()}][Gateway]{tag} Timeout de conexão ({CONNECT_TIMEOUT}s), reconectando em {reconnect_delay}s...")
+            dprint(f"[{ts()}][Gateway]{tag} Timeout de conexão ({CONNECT_TIMEOUT}s), reconectando em {reconnect_delay}s...")
             time.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX)
         except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
-            print(f"[{ts()}][Gateway]{tag} Erro de conexão: {e}, reconectando em {reconnect_delay}s...")
+            dprint(f"[{ts()}][Gateway]{tag} Erro de conexão: {e}, reconectando em {reconnect_delay}s...")
             time.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX)
         except Exception as e:
-            print(f"[{ts()}][Gateway]{tag} Erro inesperado: {e}, reconectando em {reconnect_delay}s...")
+            dprint(f"[{ts()}][Gateway]{tag} Erro inesperado: {e}, reconectando em {reconnect_delay}s...")
             time.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX)
         finally:
@@ -314,14 +347,14 @@ def run_gateway(serial_port, caster_port, log_prefix, mount=None):
             # Estatísticas da sessão encerrada
             if stats['session_start']:
                 elapsed = time.time() - stats['session_start']
-                print(f"[{ts()}][Stats]{tag} Sessão #{reconnect_count} encerrada: "
+                dprint(f"[{ts()}][Stats]{tag} Sessão #{reconnect_count} encerrada: "
                       f"{stats['bytes_received']} bytes em {elapsed:.1f}s")
             if sock:
                 try:
                     sock.close()
                 except Exception:
                     pass
-            print(f"[{ts()}][*]{tag} Threads encerradas, reiniciando gateway...")
+            dprint(f"[{ts()}][*]{tag} Threads encerradas, reiniciando gateway...")
 
 
 def main():
